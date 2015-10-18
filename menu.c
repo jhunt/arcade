@@ -324,6 +324,11 @@ title_grid_t* title_scanfs(const char *root)
 	grid->length = n;
 	n = 0;
 	for_each_object(title, &titles, staging) {
+		int row = n / grid->width;
+		int col = n % grid->width;
+		title->coords.x = col * (grid->box->w + grid->gutter);
+		title->coords.y = row * (grid->box->h + grid->gutter) + grid->gutter;
+
 		grid->titles[n++] = title;
 
 		if (!title->box_inset && !title->box_overlay && grid->font) {
