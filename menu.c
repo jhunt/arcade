@@ -149,9 +149,16 @@ title_t* title_read_from_metadata(const char *root, const char *dir)
 	return title;
 }
 
-title_grid_t* title_scanfs(const char *root)
+title_grid_t* grid_create(const char *root, int width, int height)
 {
 	title_grid_t *grid = vmalloc(sizeof(title_grid_t));
+	grid->viewport = SDL_SetVideoMode(width, height, 0, SDL_SWSURFACE|SDL_DOUBLEBUF);
+	if (!grid->viewport) {
+		fprintf(stderr, "video mode: %s\n", SDL_GetError());
+		free(grid);
+		return NULL;
+	}
+
 	grid->overlay = load_png("assets/overlay.png", NULL);
 	grid->gutter  = 10;
 
@@ -318,8 +325,8 @@ title_grid_t* title_scanfs(const char *root)
 		goto bail;
 	}
 
-	grid->width  = 1280 / (grid->box->w + grid->gutter);
-	grid->margin = (1280 - (grid->box->w * grid->width) - (grid->gutter * (grid->width - 1))) / 2;
+	grid->width  = grid->viewport->w / (grid->box->w + grid->gutter);
+	grid->margin = (grid->viewport->w - (grid->box->w * grid->width) - (grid->gutter * (grid->width - 1))) / 2;
 
 	grid->titles = vcalloc(n, sizeof(title_t*));
 	grid->length = n;
@@ -407,7 +414,7 @@ int draw_grid(title_grid_t *grid)
 	SDL_FillRect(grid->viewport, NULL, SDL_MapRGBA(grid->viewport->format, 128, 128, 128, 255));
 
 	/* find the top of the current row of boxes */
-	int top = (768 - grid->box->h) / 2;
+	int top = (grid->viewport->h - grid->box->h) / 2;
 
 	/* draw row with "current" selection in it. */
 	int w = grid->current % grid->width;
@@ -465,18 +472,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	title_grid_t *grid = title_scanfs("./root");
+	title_grid_t *grid = grid_create("./root", 1280, 768);
 	if (!grid) {
 		fprintf(stderr, "failed to initialize title grid\n");
 		return 1;
 	}
 	if (grid->length != 9) {
 		fprintf(stderr, "not enough titles found for demo!\n");
-		return 1;
-	}
-	grid->viewport = SDL_SetVideoMode(1280, 768, 0, SDL_SWSURFACE|SDL_DOUBLEBUF);
-	if (!grid->viewport) {
-		fprintf(stderr, "video mode: %s\n", SDL_GetError());
 		return 1;
 	}
 
