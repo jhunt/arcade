@@ -1,11 +1,17 @@
-mario
-mario
-mario
+box       .snes.png
+overlay   .overlay.png
+inset     0 18 328 230
+gutter    20
+highlight 4 0 200 0 255
 
-chrono
-chrono
-chrono
+game mario
+game chrono
+game name
 
-name
-name
-name
+game chrono
+game name
+game mario
+
+game name
+game mario
+game chrono

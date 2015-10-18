@@ -6,11 +6,7 @@
 #include <SDL_image.h>
 #include <SDL_ttf.h>
 
-#define TITLE_NAME_BUFSIZ 256
-
-#define TITLE_TYPE_UNKNOWN 0
-#define TITLE_TYPE_SNES    1
-#define TITLE_TYPE_NES     2
+#define TITLE_FONT_SIZE 48
 
 typedef struct {
 	char         *path;
@@ -31,17 +27,23 @@ typedef struct {
 } title_t;
 
 typedef struct {
-	int width;   /* how many titles can fit in a single row? */
-	int gutter;  /* number of pixels between each title */
-	int margin;  /* number of pixels between grid and edge of screen */
+	int width;  /* how many titles can fit in a single row? */
+	int gutter; /* number of pixels between each title */
+	int margin; /* number of pixels between grid and edge of screen */
+
+	struct {
+		int width;
+		int R, G, B, A;
+	} highlight; /* how to highlight current title */
 
 	int length;  /* how many titles are there total? */
 	int current; /* index of currently-selected title */
 	title_t **titles;
 
-	SDL_Rect box_rect, graphic_rect;
+	SDL_Rect box_rect, inset_rect;
 	SDL_Surface *box;
 	SDL_Surface *overlay;
+	TTF_Font    *font;
 } title_grid_t;
 
 SDL_Surface* load_png(const char *path, SDL_Surface *optimize_for)
@@ -111,16 +113,26 @@ title_t* title_read_from_metadata(char *root)
 			SDL_FreeSurface(title->box_inset);
 			SDL_FreeSurface(title->box_overlay);
 			title->box_overlay = NULL;
+
 			char *path = string("%s/%s", title->path, value);
+			fprintf(stderr, "loading inset from %s\n", path);
 			title->box_inset = load_png(path, NULL);
+			if (!title->box_inset) {
+				fprintf(stderr, "%s: failed to load inset; skipping\n", path);
+			}
 			free(path);
 
 		} else if (strcasecmp(key, "overlay") == 0) {
 			SDL_FreeSurface(title->box_overlay);
 			SDL_FreeSurface(title->box_inset);
 			title->box_inset = NULL;
+
 			char *path = string("%s/%s", title->path, value);
+			fprintf(stderr, "loading overlay from %s\n", path);
 			title->box_overlay = load_png(path, NULL);
+			if (!title->box_overlay) {
+				fprintf(stderr, "%s: failed to load overlay; skipping\n", path);
+			}
 			free(path);
 
 		} else {
@@ -135,6 +147,10 @@ title_t* title_read_from_metadata(char *root)
 
 title_grid_t* title_scanfs(const char *root)
 {
+	title_grid_t *grid = vmalloc(sizeof(title_grid_t));
+	grid->overlay = load_png("assets/overlay.png", NULL);
+	grid->gutter  = 10;
+
 	char *path = string("%s/.index", root);
 	FILE *io = fopen(path, "r");
 	if (!io) {
@@ -146,60 +162,187 @@ title_grid_t* title_scanfs(const char *root)
 	title_t *title = NULL;
 	unsigned int n = 0;
 	unsigned int line = 0;
-	char buf[8192], *a, *b;
+	char buf[8192], *a, *b, *key;
 	while (fgets(buf, 8191, io) != NULL) {
 		line++;
 		for (a = buf; *a && isspace(*a); a++) ; // leading whitespace
 		if (!*a || *a == '#') continue;         // blank lines and comments
 
+		for (b = a; *b && !isspace(*b); b++) ;  // first token - key
+		if (!*b || *b == '\n') {
+			fprintf(stderr, "%s:%u: malformed entry; skipping\n", path, line);
+			continue;
+		}
+		key = a;
+		*b++ = '\0';
+
+		for (a = b; *a && isspace(*a); a++) ;   // separating whitespace
+		if (!*a) {
+			fprintf(stderr, "%s:%u: malformed entry; skipping\n", path, line);
+			continue;
+		}
+
 		for (b = a; *b && *b != '\n'; b++) ;    // rest of line - value;
 		if (*b != '\n') {
-			fprintf(stderr, "%s: malformed entry on line %u (line too long?); skipping\n", path, line);
+			fprintf(stderr, "%s:%u: malformed entry; skipping\n", path, line);
 			continue;
 		}
 		*b++ = '\0';
 
-		fprintf(stderr, "checking title %s/%s\n", root, a);
-		title = title_read_from_metadata(string("%s/%s", root, a));
-		if (title) {
-			list_push(&titles, &title->staging);
-			n++;
+		if (strcasecmp(key, "BOX") == 0) {
+			char *box_path = string("%s/%s", root, a);
+			SDL_FreeSurface(grid->box);
+			grid->box = load_png(box_path, NULL);
+			if (!grid->box) {
+				fprintf(stderr, "%s:%u: box image %s not found; aborting\n", path, line, box_path);
+				free(box_path);
+				goto bail;
+			}
+			free(box_path);
+			grid->box_rect.x = grid->box_rect.y = 0;
+			grid->box_rect.w = grid->box->w;
+			grid->box_rect.h = grid->box->h;
+
+		} else if (strcasecmp(key, "OVERLAY") == 0) {
+			char *overlay_path = string("%s/%s", root, a);
+			SDL_FreeSurface(grid->overlay);
+			grid->overlay = load_png(overlay_path, NULL);
+			free(overlay_path);
+
+		} else if (strcasecmp(key, "FONT") == 0) {
+			char *font_path = string("%s/%s", root, a);
+			grid->font = TTF_OpenFont(font_path, TITLE_FONT_SIZE);
+			free(font_path);
+
+		} else if (strcasecmp(key, "INSET") == 0) {
+			int args = 0;
+			int sp = 1;
+			for (b = a; isdigit(*b) || isspace(*b); b++) { // only allow numbers and whitespace
+				if (sp && isdigit(*b)) {
+					sp = 0;
+					args++;
+				} else if (!sp && isspace(*b)) {
+					sp = 1;
+				}
+			}
+			if (*b || args != 4) {
+				fprintf(stderr, "%s:%u: inset requires four integer arguments - `inset x y width height'; skipping\n", path, line);
+				continue;
+			}
+
+			int x = 0, y = 0, w = 0, h = 0;
+			for (b = a; isdigit(*b); b++) x = x * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) y = y * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) w = w * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) h = h * 10 + (*b - '0');
+
+			fprintf(stderr, "setting inset rect to (%i,%i) %ix%i\n", x, y, w, h);
+			grid->inset_rect.x = x;
+			grid->inset_rect.y = y;
+			grid->inset_rect.w = w;
+			grid->inset_rect.h = h;
+
+		} else if (strcasecmp(key, "GUTTER") == 0) {
+			int g = 0;
+			for (b = a; isdigit(*b); b++) g = g * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			if (*a) {
+				fprintf(stderr, "%s:%u: gutter value must be an integer; skipping\n", path, line);
+				continue;
+			}
+			fprintf(stderr, "setting gutter to %i\n", g);
+			grid->gutter = g;
+
+		} else if (strcasecmp(key, "HIGHLIGHT") == 0) {
+			int args = 0;
+			int sp = 1;
+			for (b = a; isdigit(*b) || isspace(*b); b++) { // only allow numbers and whitespace
+				if (sp && isdigit(*b)) {
+					sp = 0;
+					args++;
+				} else if (!sp && isspace(*b)) {
+					sp = 1;
+				}
+			}
+			if (*b || args != 5) {
+				fprintf(stderr, "%s:%u: highlight requires five integer arguments - `highlight width R G B A'; skipping\n", path, line);
+				continue;
+			}
+
+			int w = 0, R = 0, G = 0, B = 0, A = 0;
+			for (b = a; isdigit(*b); b++) w = w * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) R = R * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) G = G * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) B = B * 10 + (*b - '0');
+			for (a = b; isspace(*a); a++) ;
+			for (b = a; isdigit(*b); b++) A = A * 10 + (*b - '0');
+
+			fprintf(stderr, "setting highlight to %i wide, rgba(%i,%i,%i,%i)\n", w, R, G, B, A);
+			grid->highlight.width = w;
+			grid->highlight.R     = R;
+			grid->highlight.G     = G;
+			grid->highlight.B     = B;
+			grid->highlight.A     = A;
+
+		} else if (strcasecmp(key, "GAME") == 0) {
+			fprintf(stderr, "checking title %s/%s\n", root, a);
+			title = title_read_from_metadata(string("%s/%s", root, a));
+			if (title) {
+				list_push(&titles, &title->staging);
+				n++;
+			}
+		} else {
+			fprintf(stderr, "%s:%u: unrecognized key `%s'; skipping\n", path, line, key);
+			continue;
 		}
 	}
-	fclose(io);
-	free(path);
 
-	title_grid_t *grid = vmalloc(sizeof(title_grid_t));
+	if (!grid->overlay) {
+		grid->overlay = load_png("assets/overlay.png", NULL);
+	}
+	if (!grid->font) {
+		grid->font = TTF_OpenFont("assets/snes.ttf", TITLE_FONT_SIZE);
+	}
+	if (!grid->box) {
+		fprintf(stderr, "%s: no box cover art template specified; aborting\n", path);
+		goto bail;
+	}
+
+	grid->width  = 1280 / (grid->box->w + grid->gutter);
+	grid->margin = (1280 - (grid->box->w * grid->width) - (grid->gutter * (grid->width - 1))) / 2;
+
 	grid->titles = vcalloc(n, sizeof(title_t*));
 	grid->length = n;
 	n = 0;
 	for_each_object(title, &titles, staging) {
 		grid->titles[n++] = title;
+
+		if (!title->box_inset && !title->box_overlay && grid->font) {
+			char *a, *s = strdup(title->metadata.title);
+			for (a = s; *a; *a = toupper(*a), a++) ;
+
+			SDL_Color fg = { 255, 255, 255 };
+			title->box_inset = TTF_RenderText_Solid(grid->font, s, fg);
+
+			free(s);
+		}
 	}
 
+	fclose(io);
+	free(path);
 	return grid;
-}
 
-int init_grid(title_grid_t *grid)
-{
-	grid->overlay = load_png("assets/overlay.png", NULL);
-
-	grid->box = load_png("assets/snes.png", NULL);
-	grid->box_rect.x = grid->box_rect.y = 0;
-	grid->box_rect.w = grid->box->w;
-	grid->box_rect.h = grid->box->h;
-
-	grid->graphic_rect.x = 0;
-	grid->graphic_rect.y = 18;
-	grid->graphic_rect.w = 328;
-	grid->graphic_rect.h = 230;
-
-	/* FIXME: determine how to better calculate optimal gutter / margin values */
-	grid->gutter = 20;
-	grid->width  = 1280 / (grid->box->w + grid->gutter);
-	grid->margin = (1280 - (grid->box->w * grid->width) - (grid->gutter * (grid->width - 1))) / 2;
-
-	return 0;
+bail:
+	fclose(io);
+	free(path);
+	free(grid);
+	return NULL;
 }
 
 int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *title)
@@ -211,10 +354,10 @@ int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *
 	SDL_Rect target, clip;
 
 	if (title->box_inset) {
-		target.x = offset->x + grid->graphic_rect.x;
-		target.y = offset->y + grid->graphic_rect.y;
-		target.w =             grid->graphic_rect.w;
-		target.h =             grid->graphic_rect.h;
+		target.x = offset->x + grid->inset_rect.x;
+		target.y = offset->y + grid->inset_rect.y;
+		target.w =             grid->inset_rect.w;
+		target.h =             grid->inset_rect.h;
 
 		clip.x = 0;
 		clip.y = 0;
@@ -244,20 +387,7 @@ int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *
 		return 0;
 	}
 
-	TTF_Font *font = TTF_OpenFont("assets/snes.ttf", 48);
-	if (font) {
-		SDL_Color fg = { 255, 255, 255 };
-		char *a, *s = strdup(title->metadata.title);
-		for (a = s; *a; *a = toupper(*a), a++) ;
-		title->box_inset = TTF_RenderText_Solid(font, s, fg);
-		free(s);
-		TTF_CloseFont(font);
-
-		if (title->box_inset)
-			return draw_title(scr, grid, offset, title);
-	}
-
-	fprintf(stderr, "failed to render");
+	fprintf(stderr, "%s: failed to render (no overlay and no inset graphic)\n", title->path);
 	return 1;
 }
 
@@ -272,11 +402,11 @@ int draw_grid(SDL_Surface *scr, title_grid_t *grid)
 
 	/* draw row with "current" selection in it. */
 	int w = grid->current % grid->width;
-	off.x = grid->margin - 4 + w * (grid->box->w + grid->gutter);
-	off.y = top - 4;
-	off.h = grid->box->h + 4 + 4;
-	off.w = grid->box->w + 4 + 4;
-	SDL_FillRect(scr, &off, SDL_MapRGBA(scr->format, 255, 0, 255, 255));
+	off.x = grid->margin - grid->highlight.width + w * (grid->box->w + grid->gutter);
+	off.y = top - grid->highlight.width;
+	off.h = grid->box->h + 2 * grid->highlight.width;
+	off.w = grid->box->w + 2 * grid->highlight.width;
+	SDL_FillRect(scr, &off, SDL_MapRGBA(scr->format, grid->highlight.R, grid->highlight.G, grid->highlight.B, grid->highlight.A));
 
 	off.x = grid->margin;
 	off.y = top;
@@ -333,11 +463,14 @@ int main(int argc, char **argv)
 	}
 
 	title_grid_t *grid = title_scanfs("./root");
+	if (!grid) {
+		fprintf(stderr, "failed to initialize title grid\n");
+		return 1;
+	}
 	if (grid->length != 9) {
 		fprintf(stderr, "not enough titles found for demo!\n");
 		return 1;
 	}
-	init_grid(grid);
 
 	int loop = 1;
 	while (loop) {
