@@ -57,18 +57,21 @@ SDL_Surface* load_png(const char *path, SDL_Surface *optimize_for)
 	return opt;
 }
 
-title_t* title_read_from_metadata(char *root)
+title_t* title_read_from_metadata(const char *root, const char *dir)
 {
-	char *path = string("%s/.title", root);
+	title_t *title = vmalloc(sizeof(title_t));
+	title->path = string("%s/%s", root, dir);;
+
+	char *path = string("%s/%s/.title", root, dir);
 	FILE *io = fopen(path, "r");
 	if (!io) {
 		fprintf(stderr, "%s: not readable\n", path);
+
+		title->metadata.title = strdup(dir);
 		free(path);
-		return NULL;
+		return title;
 	}
 
-	title_t *title = vmalloc(sizeof(title_t));
-	title->path = root;
 
 	unsigned int line = 0;
 	char buf[8192], *key, *value, *a, *b;
@@ -292,7 +295,7 @@ title_grid_t* title_scanfs(const char *root)
 
 		} else if (strcasecmp(key, "GAME") == 0) {
 			fprintf(stderr, "checking title %s/%s\n", root, a);
-			title = title_read_from_metadata(string("%s/%s", root, a));
+			title = title_read_from_metadata(root, a);
 			if (title) {
 				list_push(&titles, &title->staging);
 				n++;
