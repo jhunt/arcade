@@ -40,6 +40,7 @@ typedef struct {
 	int current; /* index of currently-selected title */
 	title_t **titles;
 
+	SDL_Surface *viewport;
 	SDL_Rect box_rect, inset_rect;
 	SDL_Surface *box;
 	SDL_Surface *overlay;
@@ -353,10 +354,10 @@ bail:
 	return NULL;
 }
 
-int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *title)
+int draw_title(title_grid_t *grid, SDL_Rect *offset, title_t *title)
 {
 	int y = offset->y;
-	SDL_BlitSurface(grid->box, NULL, scr, offset);
+	SDL_BlitSurface(grid->box, NULL, grid->viewport, offset);
 	offset->y = y;
 
 	SDL_Rect target, clip;
@@ -373,10 +374,10 @@ int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *
 		clip.h = target.h;
 
 		y = target.y;
-		SDL_FillRect(scr, &target, SDL_MapRGBA(scr->format, 20, 20, 20, 255));
+		SDL_FillRect(grid->viewport, &target, SDL_MapRGBA(grid->viewport->format, 20, 20, 20, 255));
 		target.y = y;
 
-		SDL_BlitSurface(title->box_inset, &clip, scr, &target);
+		SDL_BlitSurface(title->box_inset, &clip, grid->viewport, &target);
 		return 0;
 	}
 
@@ -391,7 +392,7 @@ int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *
 		clip.w = target.w;
 		clip.h = target.h;
 
-		SDL_BlitSurface(title->box_overlay, &clip, scr, &target);
+		SDL_BlitSurface(title->box_overlay, &clip, grid->viewport, &target);
 		return 0;
 	}
 
@@ -399,11 +400,11 @@ int draw_title(SDL_Surface *scr, title_grid_t *grid, SDL_Rect *offset, title_t *
 	return 1;
 }
 
-int draw_grid(SDL_Surface *scr, title_grid_t *grid)
+int draw_grid(title_grid_t *grid)
 {
 	SDL_Rect off = { grid->margin, 0, 0, 0 };
 
-	SDL_FillRect(scr, NULL, SDL_MapRGBA(scr->format, 128, 128, 128, 255));
+	SDL_FillRect(grid->viewport, NULL, SDL_MapRGBA(grid->viewport->format, 128, 128, 128, 255));
 
 	/* find the top of the current row of boxes */
 	int top = (768 - grid->box->h) / 2;
@@ -414,31 +415,31 @@ int draw_grid(SDL_Surface *scr, title_grid_t *grid)
 	off.y = top - grid->highlight.width;
 	off.h = grid->box->h + 2 * grid->highlight.width;
 	off.w = grid->box->w + 2 * grid->highlight.width;
-	SDL_FillRect(scr, &off, SDL_MapRGBA(scr->format, grid->highlight.R, grid->highlight.G, grid->highlight.B, grid->highlight.A));
+	SDL_FillRect(grid->viewport, &off, SDL_MapRGBA(grid->viewport->format, grid->highlight.R, grid->highlight.G, grid->highlight.B, grid->highlight.A));
 
 	off.x = grid->margin;
 	off.y = top;
 	int ii;
 	for (ii = 0; ii < grid->width; ii++) {
-		draw_title(scr, grid, &off, grid->titles[3 + ii]);
+		draw_title(grid, &off, grid->titles[3 + ii]);
 		off.x += grid->box->w + grid->gutter;
 	}
 
 	off.x = grid->margin;
 	off.y -= grid->box->h + grid->gutter;
 	for (ii = 0; ii < grid->width; ii++) {
-		draw_title(scr, grid, &off, grid->titles[0 + ii]);
+		draw_title(grid, &off, grid->titles[0 + ii]);
 		off.x += grid->box->w + grid->gutter;
 	}
 
 	off.x = grid->margin;
 	off.y += 2 * (grid->box->h + grid->gutter);
 	for (ii = 0; ii < grid->width; ii++) {
-		draw_title(scr, grid, &off, grid->titles[6 + ii]);
+		draw_title(grid, &off, grid->titles[6 + ii]);
 		off.x += grid->box->w + grid->gutter;
 	}
 
-	SDL_BlitSurface(grid->overlay, NULL, scr, NULL);
+	SDL_BlitSurface(grid->overlay, NULL, grid->viewport, NULL);
 	return 0;
 }
 
@@ -449,14 +450,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	SDL_Surface *scr;
 	SDL_Event ev;
 
-	scr = SDL_SetVideoMode(1280, 768, 0, SDL_SWSURFACE|SDL_DOUBLEBUF);
-	if (!scr) {
-		fprintf(stderr, "video mode: %s\n", SDL_GetError());
-		return 1;
-	}
 	if ( !(IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG) ) {
 		fprintf(stderr, "png lib: %s\n", IMG_GetError());
 		SDL_Quit();
@@ -479,6 +474,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "not enough titles found for demo!\n");
 		return 1;
 	}
+	grid->viewport = SDL_SetVideoMode(1280, 768, 0, SDL_SWSURFACE|SDL_DOUBLEBUF);
+	if (!grid->viewport) {
+		fprintf(stderr, "video mode: %s\n", SDL_GetError());
+		return 1;
+	}
 
 	int loop = 1;
 	while (loop) {
@@ -486,8 +486,8 @@ int main(int argc, char **argv)
 			if (ev.type == SDL_QUIT)
 				loop = 0;
 
-		draw_grid(scr, grid);
-		SDL_Flip(scr);
+		draw_grid(grid);
+		SDL_Flip(grid->viewport);
 	}
 
 	TTF_Quit();
