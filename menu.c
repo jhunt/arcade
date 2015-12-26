@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include <vigor.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include <SDL.h>
 #include <SDL_image.h>
@@ -9,8 +11,8 @@
 #define TITLE_FONT_SIZE 48
 
 typedef struct {
-	char         *path;
-	unsigned int  type;
+	char  *path;
+	char  *exec;
 
 	struct {
 		char *title;
@@ -98,22 +100,27 @@ title_t* title_read_from_metadata(const char *root, const char *dir)
 		value = a;
 		*b++ = '\0';
 
-		if (strcasecmp(key, "title") == 0) {
+		if (strcasecmp(key, "TITLE") == 0) {
 			free(title->metadata.title);
 			title->metadata.title = strdup(value);
 
-		} else if (strcasecmp(key, "developer") == 0) {
+		} else if (strcasecmp(key, "EXEC") == 0) {
+			free(title->exec);
+			title->exec = string(value, title->path);
+			//title->exec = strdup(value);
+
+		} else if (strcasecmp(key, "DEVELOPER") == 0) {
 			free(title->metadata.developer);
 			title->metadata.developer = strdup(value);
-		} else if (strcasecmp(key, "publisher") == 0) {
+		} else if (strcasecmp(key, "PUBLISHER") == 0) {
 			free(title->metadata.publisher);
 			title->metadata.publisher = strdup(value);
 
-		} else if (strcasecmp(key, "released") == 0) {
+		} else if (strcasecmp(key, "RELEASED") == 0) {
 			free(title->metadata.released);
 			title->metadata.released = strdup(value);
 
-		} else if (strcasecmp(key, "inset") == 0) {
+		} else if (strcasecmp(key, "INSET") == 0) {
 			SDL_FreeSurface(title->box_inset);
 			SDL_FreeSurface(title->box_overlay);
 			title->box_overlay = NULL;
@@ -337,6 +344,7 @@ title_grid_t* grid_create(const char *root, int width, int height)
 		title->coords.x = col * (grid->box->w + grid->gutter);
 		title->coords.y = row * (grid->box->h + grid->gutter) + grid->gutter;
 
+		fprintf(stderr, "title [%i] (%s) is at (%i,%i)\n", n, title->metadata.title, title->coords.x, title->coords.y);
 		grid->titles[n++] = title;
 
 		if (!title->box_inset && !title->box_overlay && grid->font) {
@@ -359,6 +367,31 @@ bail:
 	free(path);
 	free(grid);
 	return NULL;
+}
+
+void run_title(title_t *title)
+{
+	if (!title->exec) {
+		fprintf(stderr, "no exec defined for title %s\n", title->metadata.title);
+		return;
+	}
+
+	pid_t pid;
+	pid = fork();
+	if (pid < 0) {
+		perror("run_title: fork");
+		return;
+	}
+
+	if (pid > 0) {
+		int st;
+		waitpid(pid, &st, 0);
+		fprintf(stderr, "child process exited: %x\n", st);
+		return;
+	}
+
+	execlp("/bin/sh", "sh", "-c", title->exec, NULL);
+	exit(7);
 }
 
 int draw_title(title_grid_t *grid, SDL_Rect *offset, title_t *title)
@@ -413,37 +446,39 @@ int draw_grid(title_grid_t *grid)
 
 	SDL_FillRect(grid->viewport, NULL, SDL_MapRGBA(grid->viewport->format, 128, 128, 128, 255));
 
-	/* find the top of the current row of boxes */
-	int top = (grid->viewport->h - grid->box->h) / 2;
+	/* find the bounds of title->coords.y for what is visible in the viewport */
+	int y1, y2;
+	y1 = (grid->titles[grid->current]->coords.y - (grid->viewport->h / 2) - grid->box->h);
+	y2 = y1 + grid->viewport->h + grid->box->h;
 
-	/* draw row with "current" selection in it. */
-	int w = grid->current % grid->width;
-	off.x = grid->margin - grid->highlight.width + w * (grid->box->w + grid->gutter);
-	off.y = top - grid->highlight.width;
-	off.h = grid->box->h + 2 * grid->highlight.width;
-	off.w = grid->box->w + 2 * grid->highlight.width;
-	SDL_FillRect(grid->viewport, &off, SDL_MapRGBA(grid->viewport->format, grid->highlight.R, grid->highlight.G, grid->highlight.B, grid->highlight.A));
+	/* find the delta for translating coords.y into viewpoert coordinate system */
+	int top = grid->titles[grid->current]->coords.y - (grid->viewport->h - grid->box->h) / 2;
 
-	off.x = grid->margin;
-	off.y = top;
-	int ii;
-	for (ii = 0; ii < grid->width; ii++) {
-		draw_title(grid, &off, grid->titles[3 + ii]);
-		off.x += grid->box->w + grid->gutter;
-	}
+	int i;
+	for (i = 0; i < grid->length; i++) {
+		//fprintf(stderr, "grid[%i] is at (%i,%i) - translated to (%i,%i) bounded at %i < y <= %i\n",
+		//	i, grid->titles[i]->coords.x, grid->titles[i]->coords.y,
+		//	   grid->titles[i]->coords.x, grid->titles[i]->coords.y - top,
+		//	y1, y2);
+		if (grid->titles[i]->coords.y < y1)
+			continue;
+		if (grid->titles[i]->coords.y >= y2)
+			break;
 
-	off.x = grid->margin;
-	off.y -= grid->box->h + grid->gutter;
-	for (ii = 0; ii < grid->width; ii++) {
-		draw_title(grid, &off, grid->titles[0 + ii]);
-		off.x += grid->box->w + grid->gutter;
-	}
+		off.x = grid->titles[i]->coords.x + grid->margin;
+		off.y = grid->titles[i]->coords.y - top;
+		if (i == grid->current) {
+			off.x -= grid->highlight.width;
+			off.y -= grid->highlight.width;
+			off.w  = grid->box->w + 2 * grid->highlight.width;
+			off.h  = grid->box->h + 2 * grid->highlight.width;
+			SDL_FillRect(grid->viewport, &off, SDL_MapRGBA(grid->viewport->format, grid->highlight.R, grid->highlight.G, grid->highlight.B, grid->highlight.A));
 
-	off.x = grid->margin;
-	off.y += 2 * (grid->box->h + grid->gutter);
-	for (ii = 0; ii < grid->width; ii++) {
-		draw_title(grid, &off, grid->titles[6 + ii]);
-		off.x += grid->box->w + grid->gutter;
+			off.x += grid->highlight.width;
+			off.y += grid->highlight.width;
+		}
+
+		draw_title(grid, &off, grid->titles[i]);
 	}
 
 	SDL_BlitSurface(grid->overlay, NULL, grid->viewport, NULL);
@@ -452,10 +487,20 @@ int draw_grid(title_grid_t *grid)
 
 int main(int argc, char **argv)
 {
-	if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) {
 		fprintf(stderr, "SDL: %s\n", SDL_GetError());
 		return 1;
 	}
+
+	printf("%i joysticks were found.\n\n", SDL_NumJoysticks() );
+	printf("The names of the joysticks are:\n");
+
+	int i;
+	for (i = 0; i < SDL_NumJoysticks(); i++) {
+		printf("    %s\n", SDL_JoystickName(i));
+	}
+	SDL_JoystickEventState(SDL_ENABLE);
+	SDL_JoystickOpen(0);
 
 	SDL_Event ev;
 
@@ -472,21 +517,98 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	title_grid_t *grid = grid_create("./root", 1280, 768);
+	title_grid_t *grid = grid_create("/opt/arcade/roms/snes", 1280, 768);
 	if (!grid) {
 		fprintf(stderr, "failed to initialize title grid\n");
 		return 1;
 	}
-	if (grid->length != 9) {
-		fprintf(stderr, "not enough titles found for demo!\n");
-		return 1;
-	}
+	grid->current = 0;
 
 	int loop = 1;
+	while (SDL_PollEvent(&ev)) ;
 	while (loop) {
-		while (SDL_PollEvent(&ev))
+		int move_x = 0;
+		int move_y = 0;
+		int exec   = 0;
+
+		while (SDL_PollEvent(&ev)) {
 			if (ev.type == SDL_QUIT)
 				loop = 0;
+
+			if (ev.type == SDL_JOYBUTTONUP) {
+				fprintf(stderr, "joybutton pressed: %u/%u\n", ev.jbutton.button, ev.jbutton.state);
+				switch (ev.jbutton.button) {
+				case 0: /* A */
+				case 1: /* B */
+				case 2: /* B */
+				case 3: /* B */
+				case 9: /* start */
+					move_x = move_y = 0;
+					exec = 1;
+					break;
+
+				case 13: /* Dpad L */
+					exec = move_y = 0;
+					move_x = -1;
+					break;
+
+				case 14: /* Dpad R */
+					exec = move_y = 0;
+					move_x = 1;
+					break;
+
+				case 15: /* Dpad U */
+					exec = move_x = 0;
+					move_y = -1;
+					break;
+
+				case 16: /* Dpad D */
+					exec = move_x = 0;
+					move_y = 1;
+					break;
+
+				}
+			}
+			if (ev.type == SDL_JOYAXISMOTION && ev.jaxis.value != 0) {
+				switch (ev.jaxis.axis) {
+				case 0:
+				case 2:
+					move_x = ev.jaxis.value < -32000 ? -1
+					       : ev.jaxis.value >  32000 ?  1 : 0;
+					move_y = 0;
+					exec   = 0;
+					break;
+				case 1:
+				case 3:
+					move_x = 0;
+					move_y = ev.jaxis.value < -32000 ? -1
+					       : ev.jaxis.value >  32000 ?  1 : 0;
+					exec   = 0;
+					break;
+				default:
+					fprintf(stderr, "joyaxies pressed: %u @%i\n", ev.jaxis.axis, ev.jaxis.value);
+				}
+			}
+		}
+
+		if (move_x != 0) {
+			int col = grid->current % grid->width;
+			if (col > 0 && move_x < 0)
+				grid->current--;
+			else if (col < grid->width - 1 && move_x > 0)
+				grid->current++;
+
+		} else if (move_y != 0) {
+			if (grid->current > grid->width - 1 && move_y < 0)
+				grid->current -= 3;
+			else if (grid->current < grid->length - 3 && move_y > 0)
+				grid->current += 3;
+
+		} else if (exec) {
+			// only on start (7)
+			run_title(grid->titles[grid->current]);
+			while (SDL_PollEvent(&ev)) ;
+		}
 
 		draw_grid(grid);
 		SDL_Flip(grid->viewport);
